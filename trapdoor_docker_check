@@ -1,0 +1,376 @@
+#!/bin/bash
+# ============================================================
+#  TrapDoor Docker 容器安全自查脚本 v2
+#  新增：OKX / 币安 / Rabby / MetaMask / Phantom 钱包检查
+#       EVM / Solana / TRON 链钱包文件检查（挂载目录）
+# ============================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+PASS=0; WARN=0; FAIL=0
+
+pass()      { echo -e "    ${GREEN}✅ PASS${RESET}  $1"; ((PASS++)); }
+warn()      { echo -e "    ${YELLOW}⚠️  WARN${RESET}  $1"; ((WARN++)); }
+fail()      { echo -e "    ${RED}❌ FAIL${RESET}  $1"; ((FAIL++)); }
+info()      { echo -e "    ${DIM}       ℹ️  $1${RESET}"; }
+recommend() { echo -e "    ${CYAN}       💡 建议：$1${RESET}"; }
+
+PYPI_PKGS="eth-security-auditor|cryptowallet-safety|defi-risk-scanner|mnemonic-safety-check"
+NPM_PKGS="wallet-security-checker|defi-threat-scanner|token-usage-tracker|prompt-engineering-toolkit|llm-context-compressor|web3-secrets-detector|solidity-deploy-guard|dev-env-bootstrapper|defi-env-auditor"
+CARGO_PKGS="sui-move-build-helper|move-compiler-tools"
+
+# 浏览器钱包扩展 ID 映射
+declare -A WALLET_IDS=(
+    ["MetaMask"]="nkbihfbeogaeaoehlefnkodbefgpgknn"
+    ["Rabby"]="acmacodkjbdgmoleebolmdjonilkdbch"
+    ["OKX Wallet"]="mcohilncbfahbmgdjkbpemcciiolgcge"
+    ["Binance Web3 Wallet"]="fhbohimaelbohpjbbldcngcnapndodjp"
+    ["Phantom"]="bfnaelmomeimhlpmgjnjophhpkkoljpa"
+    ["TronLink"]="ibnejdfjmmkpcnlpebklmnkoeoihofec"
+)
+
+# ============================================================
+# 挂载目录：浏览器钱包扩展扫描
+# ============================================================
+scan_browser_wallets_in_mount() {
+    local MOUNT_SRC="$1"
+    local FOUND_ANY=0
+
+    echo -e "    ${DIM}── 浏览器钱包扩展扫描 ─────────────────────${RESET}"
+
+    for WALLET_NAME in "${!WALLET_IDS[@]}"; do
+        local EXT_ID="${WALLET_IDS[$WALLET_NAME]}"
+        # 在挂载目录下递归搜索该扩展 ID 目录
+        local EXT_PATHS
+        EXT_PATHS=$(find "$MOUNT_SRC" -maxdepth 8 -type d -name "$EXT_ID" 2>/dev/null)
+        if [ -n "$EXT_PATHS" ]; then
+            fail "挂载目录中发现 ${WALLET_NAME} 钱包扩展数据！"
+            echo "$EXT_PATHS" | while read -r p; do info "路径：$p"; done
+            recommend "浏览器钱包扩展数据不应挂载进容器，TrapDoor 可直接读取加密 vault"
+            recommend "立即检查该容器是否应有权访问此目录"
+            FOUND_ANY=1
+        fi
+    done
+
+    # 额外扫描 Local Extension Settings 目录（未知扩展）
+    local EXT_DIRS
+    EXT_DIRS=$(find "$MOUNT_SRC" -maxdepth 8 -type d -name "Local Extension Settings" 2>/dev/null)
+    if [ -n "$EXT_DIRS" ] && [ "$FOUND_ANY" -eq 0 ]; then
+        warn "挂载目录中发现浏览器扩展存储目录"
+        echo "$EXT_DIRS" | while read -r d; do info "$d"; done
+        recommend "确认容器是否需要访问浏览器扩展数据，建议限制挂载范围"
+        FOUND_ANY=1
+    fi
+
+    [ "$FOUND_ANY" -eq 0 ] && pass "挂载目录中未发现浏览器钱包扩展数据"
+}
+
+# ============================================================
+# 挂载目录：CLI 链上钱包扫描
+# ============================================================
+scan_cli_wallets_in_mount() {
+    local MOUNT_SRC="$1"
+    local FOUND_ANY=0
+
+    echo -e "    ${DIM}── CLI 开发者钱包扫描 ──────────────────────${RESET}"
+
+    # Solana keypair
+    local SOLANA_KEYS
+    SOLANA_KEYS=$(find "$MOUNT_SRC" -maxdepth 6 -path "*/solana/*.json" -o -path "*/.config/solana*" 2>/dev/null | head -5)
+    if [ -n "$SOLANA_KEYS" ]; then
+        fail "挂载目录中发现 Solana 密钥文件！"
+        echo "$SOLANA_KEYS" | while read -r f; do info "$f"; done
+        recommend "Solana id.json 含私钥明文，不应挂载进容器；改用环境变量传入公钥地址"
+        FOUND_ANY=1
+    else
+        pass "Solana：挂载目录中未发现密钥文件"
+    fi
+
+    # EVM keystore（Geth UTC-- 格式）
+    local EVM_KEYS
+    EVM_KEYS=$(find "$MOUNT_SRC" -maxdepth 6 \( -name "UTC--*" -o -path "*/keystore/UTC--*" \) 2>/dev/null | head -5)
+    if [ -n "$EVM_KEYS" ]; then
+        fail "挂载目录中发现 EVM keystore 文件！"
+        echo "$EVM_KEYS" | while read -r f; do info "$f"; done
+        recommend "EVM keystore 是 TrapDoor 重点窃取目标，禁止挂载进容器"
+        FOUND_ANY=1
+    else
+        pass "EVM：挂载目录中未发现 keystore 文件"
+    fi
+
+    # Foundry keystores
+    local FOUNDRY_KEYS
+    FOUNDRY_KEYS=$(find "$MOUNT_SRC" -maxdepth 6 -path "*/.foundry/keystores*" 2>/dev/null | head -5)
+    if [ -n "$FOUNDRY_KEYS" ]; then
+        fail "挂载目录中发现 Foundry keystore！"
+        echo "$FOUNDRY_KEYS" | while read -r f; do info "$f"; done
+        recommend "Foundry keystore 含部署私钥，不应出现在容器挂载目录中"
+        FOUND_ANY=1
+    else
+        pass "Foundry：挂载目录中未发现 keystore"
+    fi
+
+    # Hardhat 明文私钥
+    local HARDHAT_CFGS
+    HARDHAT_CFGS=$(find "$MOUNT_SRC" -maxdepth 6 -name "hardhat.config.*" -not -path "*/node_modules/*" 2>/dev/null)
+    if [ -n "$HARDHAT_CFGS" ]; then
+        local HH_FOUND=0
+        echo "$HARDHAT_CFGS" | while read -r f; do
+            if grep -qiE "(mnemonic|privateKey|private_key)" "$f" 2>/dev/null; then
+                fail "挂载的 Hardhat 配置文件含明文私钥！"
+                info "$f"
+                recommend "将私钥从 hardhat.config 移除，改用 dotenv + .env 文件（加入 .gitignore）"
+            fi
+        done
+    else
+        pass "Hardhat：挂载目录中未发现含私钥的配置文件"
+    fi
+
+    # TRON 私钥文件
+    local TRON_KEYS
+    TRON_KEYS=$(find "$MOUNT_SRC" -maxdepth 6 -name "*.json" -not -path "*/node_modules/*" 2>/dev/null \
+        | xargs grep -lE '"privateKey"|"tronAddress"' 2>/dev/null | head -5)
+    if [ -n "$TRON_KEYS" ]; then
+        fail "挂载目录中发现疑似 TRON 私钥 JSON！"
+        echo "$TRON_KEYS" | while read -r f; do info "$f"; done
+        recommend "TRON 私钥明文不应出现在容器挂载目录，使用硬件钱包或加密保管"
+        FOUND_ANY=1
+    else
+        pass "TRON：挂载目录中未发现私钥文件"
+    fi
+
+    # Sui keystore
+    local SUI_KEYS
+    SUI_KEYS=$(find "$MOUNT_SRC" -maxdepth 6 -path "*/.sui/sui_config*" 2>/dev/null | head -3)
+    if [ -n "$SUI_KEYS" ]; then
+        fail "挂载目录中发现 Sui keystore！（TrapDoor 主要目标）"
+        echo "$SUI_KEYS" | while read -r f; do info "$f"; done
+        recommend "Sui keystore 是 TrapDoor build.rs 脚本的直接窃取对象，禁止挂载进容器"
+        FOUND_ANY=1
+    else
+        pass "Sui：挂载目录中未发现 keystore"
+    fi
+
+    # Aptos
+    local APTOS_KEYS
+    APTOS_KEYS=$(find "$MOUNT_SRC" -maxdepth 6 -path "*/.aptos*" 2>/dev/null | head -3)
+    if [ -n "$APTOS_KEYS" ]; then
+        warn "挂载目录中发现 Aptos 配置文件"
+        echo "$APTOS_KEYS" | while read -r f; do info "$f"; done
+        recommend "检查 ~/.aptos/config.yaml 是否含私钥字段，主网密钥不应挂载进容器"
+        FOUND_ANY=1
+    else
+        pass "Aptos：挂载目录中未发现配置文件"
+    fi
+
+    # 通用 wallet.json / *.keystore（排除 GNOME 系统文件）
+    local GENERIC
+    GENERIC=$(find "$MOUNT_SRC" -maxdepth 5 \
+        \( -name "wallet.json" -o -name "*.keystore" \) \
+        -not -path "*keyrings/user.keystore*" \
+        -not -path "*/node_modules/*" \
+        2>/dev/null | head -5)
+    if [ -n "$GENERIC" ]; then
+        warn "挂载目录中发现通用钱包文件"
+        echo "$GENERIC" | while read -r f; do info "$f"; done
+        recommend "确认这些文件是否有必要挂载进容器，无必要应立即移除挂载"
+        FOUND_ANY=1
+    fi
+}
+
+# ============================================================
+# 前置检查
+# ============================================================
+clear
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
+echo -e "${BOLD}║    TrapDoor Docker 容器安全自查脚本 v2           ║${RESET}"
+echo -e "${BOLD}║    基于 Socket Security 2026.05 报告             ║${RESET}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${RESET}"
+echo -e "  检查时间：$(date '+%Y-%m-%d %H:%M:%S')"
+echo ""
+
+if ! command -v docker &>/dev/null; then
+    echo -e "  ${RED}❌ 未找到 docker 命令${RESET}"; exit 1
+fi
+if ! docker info &>/dev/null 2>&1; then
+    echo -e "  ${RED}❌ 无法连接 Docker，请检查权限或使用 sudo${RESET}"; exit 1
+fi
+
+CONTAINERS=$(docker ps --format '{{.Names}}')
+if [ -z "$CONTAINERS" ]; then
+    echo -e "  ${YELLOW}⚠️  当前没有运行中的容器${RESET}"; exit 0
+fi
+
+CONTAINER_COUNT=$(echo "$CONTAINERS" | wc -l)
+echo -e "  ${BOLD}发现 ${CONTAINER_COUNT} 个运行中的容器：${RESET}"
+echo "$CONTAINERS" | while read -r c; do
+    IMAGE=$(docker inspect --format '{{.Config.Image}}' "$c" 2>/dev/null)
+    echo -e "    ${DIM}▸ $c  （镜像：$IMAGE）${RESET}"
+done
+echo ""
+
+# ============================================================
+# 逐容器检查
+# ============================================================
+echo "$CONTAINERS" | while read -r CONTAINER; do
+
+    IMAGE=$(docker inspect --format '{{.Config.Image}}' "$CONTAINER" 2>/dev/null)
+
+    echo ""
+    echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════${RESET}"
+    echo -e "${BOLD}${BLUE}  容器：${CONTAINER}  （${IMAGE}）${RESET}"
+    echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════${RESET}"
+
+    # ----------------------------------------------------------
+    # 方案二：容器内恶意包扫描
+    # ----------------------------------------------------------
+    echo ""
+    echo -e "  ${BOLD}【方案二】容器内恶意包扫描${RESET}"
+
+    if docker exec "$CONTAINER" which pip &>/dev/null 2>&1 || docker exec "$CONTAINER" which pip3 &>/dev/null 2>&1; then
+        PIP_CMD=$(docker exec "$CONTAINER" which pip3 2>/dev/null || docker exec "$CONTAINER" which pip 2>/dev/null)
+        FOUND=$(docker exec "$CONTAINER" $PIP_CMD list 2>/dev/null | grep -iE "$PYPI_PKGS")
+        if [ -z "$FOUND" ]; then pass "PyPI：未发现 TrapDoor 恶意包"
+        else
+            fail "PyPI：发现恶意包！"
+            echo "$FOUND" | while read -r line; do info "$line"; done
+            recommend "docker exec $CONTAINER pip uninstall <包名>，然后重建镜像"
+        fi
+    else info "PyPI：容器内无 pip，跳过"; fi
+
+    if docker exec "$CONTAINER" which npm &>/dev/null 2>&1; then
+        FOUND=$(docker exec "$CONTAINER" npm ls 2>/dev/null | grep -E "$NPM_PKGS")
+        if [ -z "$FOUND" ]; then pass "npm：未发现 TrapDoor 恶意包"
+        else
+            fail "npm：发现恶意包！"
+            echo "$FOUND" | while read -r line; do info "$line"; done
+            recommend "docker exec $CONTAINER npm uninstall <包名>"
+        fi
+    else info "npm：容器内无 npm，跳过"; fi
+
+    if docker exec "$CONTAINER" which cargo &>/dev/null 2>&1; then
+        FOUND=$(docker exec "$CONTAINER" cargo metadata 2>/dev/null | grep -E "$CARGO_PKGS")
+        if [ -z "$FOUND" ]; then pass "Cargo：未发现 TrapDoor 恶意包"
+        else
+            fail "Cargo：发现恶意包！"
+            echo "$FOUND" | while read -r line; do info "$line"; done
+            recommend "从 Cargo.toml 中移除该依赖，重新构建镜像"
+        fi
+    else info "Cargo：容器内无 cargo，跳过"; fi
+
+    AI_RESULT=$(docker exec "$CONTAINER" find / -maxdepth 6 \
+        \( -name ".cursorrules" -o -name "CLAUDE.md" -o -name "AGENTS.md" \) 2>/dev/null | grep -v proc)
+    if [ -z "$AI_RESULT" ]; then pass "AI 配置文件：容器内未发现篡改风险文件"
+    else
+        warn "AI 配置文件：容器内发现以下文件"
+        echo "$AI_RESULT" | while read -r f; do
+            info "$f"
+            HIDDEN=$(docker exec "$CONTAINER" cat -v "$f" 2>/dev/null | grep -P '\^[A-Z\[\\\]^_`]|\x00')
+            [ -n "$HIDDEN" ] && fail "文件 $f 中发现隐藏字符！疑似被注入恶意指令" && recommend "立即删除并重建容器镜像"
+        done
+        recommend "确认这些 AI 配置文件是你本人放入的"
+    fi
+
+    # ----------------------------------------------------------
+    # 方案三：挂载目录扫描
+    # ----------------------------------------------------------
+    echo ""
+    echo -e "  ${BOLD}【方案三】宿主机挂载目录扫描${RESET}"
+
+    MOUNTS=$(docker inspect "$CONTAINER" \
+        --format '{{range .Mounts}}{{.Source}}|{{.Destination}}|{{.Type}}{{"\n"}}{{end}}' 2>/dev/null)
+
+    if [ -z "$MOUNTS" ]; then
+        pass "该容器无挂载目录"
+    else
+        MOUNT_COUNT=$(echo "$MOUNTS" | grep -c .)
+        info "发现 $MOUNT_COUNT 个挂载点"
+        echo "$MOUNTS" | while IFS='|' read -r SRC DST TYPE; do
+            [ -z "$SRC" ] && continue
+            echo ""
+            info "宿主机：$SRC  →  容器：$DST  （类型：$TYPE）"
+
+            if [ ! -d "$SRC" ] && [ ! -f "$SRC" ]; then
+                info "宿主机路径不存在或无权限，跳过"; continue
+            fi
+
+            # .env 文件
+            ENV_FILES=$(find "$SRC" -name ".env" -not -path "*/node_modules/*" 2>/dev/null)
+            if [ -n "$ENV_FILES" ]; then
+                warn "发现 .env 文件"
+                echo "$ENV_FILES" | while read -r f; do
+                    KC=$(grep -ciE "(api_key|secret|token|password|private|mnemonic)" "$f" 2>/dev/null || echo 0)
+                    info "$f  （含 $KC 处疑似敏感字段）"
+                done
+                recommend "确认 .env 文件已加入 .gitignore，敏感凭证不要挂载进容器"
+            else
+                pass "挂载目录中无 .env 文件"
+            fi
+
+            # AI 配置文件
+            AI_FILES=$(find "$SRC" -maxdepth 4 \
+                \( -name ".cursorrules" -o -name "CLAUDE.md" -o -name "AGENTS.md" \) 2>/dev/null)
+            if [ -n "$AI_FILES" ]; then
+                warn "挂载目录中发现 AI 配置文件"
+                echo "$AI_FILES" | while read -r f; do
+                    info "$f"
+                    HIDDEN=$(cat -v "$f" 2>/dev/null | grep -P '\^[A-Z\[\\\]^_`]')
+                    [ -n "$HIDDEN" ] && fail "$f 中发现隐藏字符！" && recommend "立即检查内容，追查写入来源"
+                done
+                recommend "定期 diff 检查这些文件，防止被恶意包篡改"
+            else
+                pass "挂载目录中无 AI 配置文件"
+            fi
+
+            # shell 配置文件明文凭证
+            SHELL_CFGS=$(find "$SRC" -maxdepth 3 \
+                \( -name ".bashrc" -o -name ".zshrc" -o -name ".profile" \) 2>/dev/null)
+            if [ -n "$SHELL_CFGS" ]; then
+                echo "$SHELL_CFGS" | while read -r f; do
+                    KEYS=$(grep -E "export.*(key|token|secret|password|api|mnemonic)[[:space:]]*=" "$f" 2>/dev/null | grep -v "^#")
+                    [ -n "$KEYS" ] && fail "挂载的 shell 配置文件 $f 中发现明文凭证！" \
+                        && recommend "将凭证从 shell 配置移除，改用 Docker --env-file 或 secrets"
+                done
+            fi
+
+            # 浏览器钱包扩展扫描
+            scan_browser_wallets_in_mount "$SRC"
+
+            # CLI 链上钱包扫描
+            scan_cli_wallets_in_mount "$SRC"
+
+        done
+    fi
+
+done
+
+# ============================================================
+# 汇总
+# ============================================================
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
+echo -e "${BOLD}║                  检查结果汇总                    ║${RESET}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${RESET}"
+echo ""
+echo -e "  ${GREEN}✅ 通过  ${RESET}${BOLD}$PASS${RESET} 项"
+echo -e "  ${YELLOW}⚠️  警告  ${RESET}${BOLD}$WARN${RESET} 项  （需人工确认）"
+echo -e "  ${RED}❌ 危险  ${RESET}${BOLD}$FAIL${RESET} 项  （需立即处理）"
+echo ""
+if [ "$FAIL" -gt 0 ]; then
+    echo -e "  ${RED}${BOLD}🚨 发现危险项！请按上方建议立即处理，并轮换所有相关凭证。${RESET}"
+elif [ "$WARN" -gt 0 ]; then
+    echo -e "  ${YELLOW}${BOLD}检查完成，存在需关注项目，请逐一人工确认。${RESET}"
+else
+    echo -e "  ${GREEN}${BOLD}🎉 全部通过！未发现 TrapDoor 感染迹象。${RESET}"
+fi
+echo ""
+echo -e "  ${DIM}共扫描 $CONTAINER_COUNT 个容器 | TrapDoor 参考：Socket Security 2026.05.25${RESET}"
+echo ""

@@ -1,0 +1,442 @@
+#!/bin/bash
+# ============================================================
+#  TrapDoor 安全自查脚本 v2
+#  新增：OKX / 币安 / Rabby / MetaMask / Phantom 钱包检查
+#       EVM / Solana / TRON 链钱包文件检查
+# ============================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+PASS=0; WARN=0; FAIL=0
+
+section()   { echo ""; echo -e "${BOLD}${BLUE}══════════════════════════════════════════${RESET}"; echo -e "${BOLD}${BLUE}  $1${RESET}"; echo -e "${BOLD}${BLUE}══════════════════════════════════════════${RESET}"; }
+pass()      { echo -e "  ${GREEN}✅ PASS${RESET}  $1"; ((PASS++)); }
+warn()      { echo -e "  ${YELLOW}⚠️  WARN${RESET}  $1"; ((WARN++)); }
+fail()      { echo -e "  ${RED}❌ FAIL${RESET}  $1"; ((FAIL++)); }
+info()      { echo -e "  ${DIM}     ℹ️   $1${RESET}"; }
+recommend() { echo -e "  ${CYAN}     💡 建议：$1${RESET}"; }
+
+# ============================================================
+# 钱包扩展检查公共函数
+# check_browser_wallet <钱包名> <扩展ID>
+# ============================================================
+check_browser_wallet() {
+    local NAME="$1"
+    local EXT_ID="$2"
+    local FOUND_ANY=0
+    local BROWSERS=(
+        "$HOME/.config/google-chrome/Default/Local Extension Settings"
+        "$HOME/.config/google-chrome/Profile 1/Local Extension Settings"
+        "$HOME/.config/chromium/Default/Local Extension Settings"
+        "$HOME/.config/brave-browser/Default/Local Extension Settings"
+        "$HOME/.config/microsoft-edge/Default/Local Extension Settings"
+    )
+    for BROWSER_DIR in "${BROWSERS[@]}"; do
+        local EXT_PATH="$BROWSER_DIR/$EXT_ID"
+        if [ -d "$EXT_PATH" ]; then
+            local SIZE
+            SIZE=$(du -sh "$EXT_PATH" 2>/dev/null | cut -f1)
+            local BROWSER_NAME
+            BROWSER_NAME=$(echo "$BROWSER_DIR" | grep -oP '(?<=/\.config/)[^/]+')
+            warn "${NAME} 钱包数据目录已发现（${BROWSER_NAME}，大小：${SIZE}）"
+            info "路径：$EXT_PATH"
+            recommend "${NAME} 扩展数据是 TrapDoor 重点目标，确保浏览器为最新版本，助记词已用硬件备份"
+            FOUND_ANY=1
+        fi
+    done
+    # Firefox 检查（扫描所有 profile）
+    if [ -d "$HOME/.mozilla/firefox" ]; then
+        local FF_EXT
+        FF_EXT=$(find "$HOME/.mozilla/firefox" -maxdepth 4 -type d -name "*.default*" 2>/dev/null)
+        if [ -n "$FF_EXT" ]; then
+            # Firefox 用 UUID 而非扩展 ID，通过扩展名称目录匹配
+            local FF_WALLET
+            FF_WALLET=$(find "$HOME/.mozilla/firefox" -maxdepth 6 -type d 2>/dev/null | grep -i "$(echo "$NAME" | tr '[:upper:]' '[:lower:]')" | head -3)
+            if [ -n "$FF_WALLET" ]; then
+                warn "${NAME} Firefox 扩展数据疑似存在"
+                echo "$FF_WALLET" | while read -r p; do info "路径：$p"; done
+                FOUND_ANY=1
+            fi
+        fi
+    fi
+    if [ "$FOUND_ANY" -eq 0 ]; then
+        pass "${NAME}：未发现浏览器钱包数据"
+    fi
+}
+
+# ============================================================
+# CLI / 开发者钱包检查公共函数
+# check_cli_wallet <名称> <目录或文件路径> <建议文字>
+# ============================================================
+check_cli_wallet() {
+    local NAME="$1"
+    local PATH_PATTERN="$2"
+    local ADVICE="$3"
+    # 支持通配符展开
+    local FOUND
+    FOUND=$(eval "ls -d $PATH_PATTERN 2>/dev/null" | head -5)
+    if [ -n "$FOUND" ]; then
+        local FILE_COUNT
+        FILE_COUNT=$(eval "find $PATH_PATTERN -type f 2>/dev/null" | wc -l)
+        warn "${NAME} 钱包/密钥目录已发现（含 ${FILE_COUNT} 个文件）"
+        echo "$FOUND" | while read -r p; do info "路径：$p"; done
+        recommend "$ADVICE"
+    else
+        pass "${NAME}：未发现本地钱包文件"
+    fi
+}
+
+# ============================================================
+# 开始
+# ============================================================
+clear
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
+echo -e "${BOLD}║      TrapDoor 恶意软件安全自查脚本 v2            ║${RESET}"
+echo -e "${BOLD}║      基于 Socket Security 2026.05 报告           ║${RESET}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${RESET}"
+echo -e "  检查时间：$(date '+%Y-%m-%d %H:%M:%S')"
+echo -e "  当前用户：$(whoami)  主机：$(hostname)"
+
+# ============================================================
+# 1. TrapDoor 恶意 npm 包
+# ============================================================
+section "1/9  恶意 npm 包检查"
+NPM_PKGS="wallet-security-checker|defi-threat-scanner|token-usage-tracker|prompt-engineering-toolkit|llm-context-compressor|web3-secrets-detector|solidity-deploy-guard|dev-env-bootstrapper|defi-env-auditor"
+if command -v npm &>/dev/null; then
+    FOUND=$(npm ls 2>/dev/null | grep -E "$NPM_PKGS")
+    if [ -z "$FOUND" ]; then pass "未发现已知 TrapDoor npm 恶意包"
+    else
+        fail "发现恶意 npm 包！"
+        echo "$FOUND" | while read -r line; do info "$line"; done
+        recommend "立即执行：npm uninstall <包名>，并轮换所有 API 密钥和 token"
+    fi
+else
+    warn "npm 未安装，跳过此项检查"
+    recommend "若后续安装 Node.js，请重新运行此脚本"
+fi
+
+# ============================================================
+# 2. TrapDoor 恶意 PyPI 包
+# ============================================================
+section "2/9  恶意 PyPI 包检查"
+PYPI_PKGS="eth-security-auditor|cryptowallet-safety|defi-risk-scanner|mnemonic-safety-check"
+if command -v pip &>/dev/null || command -v pip3 &>/dev/null; then
+    PIP_CMD=$(command -v pip3 || command -v pip)
+    FOUND=$($PIP_CMD list 2>/dev/null | grep -iE "$PYPI_PKGS")
+    if [ -z "$FOUND" ]; then pass "未发现已知 TrapDoor PyPI 恶意包"
+    else
+        fail "发现恶意 PyPI 包！"
+        echo "$FOUND" | while read -r line; do info "$line"; done
+        recommend "立即执行：pip uninstall <包名>，并检查 ~/.local 目录"
+    fi
+else
+    warn "pip 未安装，跳过此项检查"
+fi
+
+# ============================================================
+# 3. TrapDoor 恶意 Cargo 包
+# ============================================================
+section "3/9  恶意 Cargo 包检查"
+CARGO_PKGS="sui-move-build-helper|move-compiler-tools"
+if command -v cargo &>/dev/null; then
+    FOUND=$(cargo metadata 2>/dev/null | grep -E "$CARGO_PKGS")
+    if [ -z "$FOUND" ]; then pass "未发现已知 TrapDoor Cargo 恶意包"
+    else
+        fail "发现恶意 Cargo 包！"
+        echo "$FOUND" | while read -r line; do info "$line"; done
+        recommend "从 Cargo.toml 中移除该依赖，并检查本地 Sui/Aptos keystore"
+    fi
+else
+    warn "cargo 未安装，跳过此项检查"
+    info "如果你是 Sui/Move 开发者，请安装 Rust 后重新检查"
+fi
+
+# ============================================================
+# 4. AI 配置文件篡改检查
+# ============================================================
+section "4/9  AI 配置文件完整性检查"
+AI_FILES=(".cursorrules" "CLAUDE.md" "AGENTS.md" ".clinerules")
+AI_FOUND=0
+for f in "${AI_FILES[@]}"; do
+    FULL_PATH="$HOME/$f"
+    if [ -f "$FULL_PATH" ]; then
+        HIDDEN=$(cat -v "$FULL_PATH" 2>/dev/null | grep -P '[\x00-\x08\x0b\x0e-\x1f\x7f]|\^[A-Z\[\\\]^_`]')
+        if [ -n "$HIDDEN" ]; then
+            fail "文件 $f 中发现隐藏字符，可能已被注入恶意指令！"
+            recommend "立即删除该文件：rm ~/$f，并检查 git 历史是否有异常提交"
+        else
+            warn "文件 $f 存在，内容正常（无隐藏字符）"
+            info "文件路径：$FULL_PATH"
+            recommend "定期检查此文件内容，确保没有被未知来源的包修改"
+        fi
+        AI_FOUND=1
+    fi
+done
+[ "$AI_FOUND" -eq 0 ] && pass "未发现 AI 配置文件（无篡改风险）"
+
+# ============================================================
+# 5. SSH 安全检查
+# ============================================================
+section "5/9  SSH 安全检查"
+if [ -f ~/.ssh/authorized_keys ]; then
+    LINE_COUNT=$(grep -c . ~/.ssh/authorized_keys 2>/dev/null || echo 0)
+    if [ "$LINE_COUNT" -eq 0 ]; then pass "authorized_keys 为空，无远程登录后门"
+    else
+        warn "authorized_keys 中有 $LINE_COUNT 条公钥记录"
+        cat ~/.ssh/authorized_keys | while read -r line; do info "$line"; done
+        recommend "确认每一条公钥都是你本人添加的，删除不认识的公钥"
+    fi
+else
+    pass "authorized_keys 文件不存在，无后门风险"
+fi
+PRIVATE_KEYS=$(find ~/.ssh -type f ! -name "*.pub" ! -name "authorized_keys" ! -name "known_hosts" ! -name "config" 2>/dev/null)
+if [ -z "$PRIVATE_KEYS" ]; then
+    pass "未发现 SSH 私钥文件"
+    info "如需使用 SSH，建议生成 ed25519 密钥：ssh-keygen -t ed25519"
+else
+    warn "发现 SSH 私钥文件"
+    echo "$PRIVATE_KEYS" | while read -r k; do info "$k"; done
+    recommend "确认私钥设有密码保护：ssh-keygen -y -f <私钥路径>"
+fi
+
+# ============================================================
+# 6. 云端凭证检查
+# ============================================================
+section "6/9  云端凭证检查"
+if [ -f ~/.aws/credentials ]; then
+    KEY_COUNT=$(grep -c "aws_access_key_id" ~/.aws/credentials 2>/dev/null || echo 0)
+    warn "发现 AWS 凭证文件（含 $KEY_COUNT 个 access key）"
+    recommend "确认使用最小权限 IAM 角色，避免使用 root 账户的 access key"
+else pass "未发现 AWS 凭证"; fi
+if [ -d ~/.config/gcloud ]; then
+    warn "发现 Google Cloud 配置目录"
+    recommend "执行 gcloud auth list 检查已授权账号，移除不需要的授权"
+else pass "未发现 GCP 凭证"; fi
+if [ -d ~/.azure ]; then
+    warn "发现 Azure 配置目录"
+    recommend "执行 az account list 检查已登录账号"
+else pass "未发现 Azure 凭证"; fi
+if [ -f ~/.docker/config.json ]; then
+    warn "发现 Docker Registry 凭证"
+    recommend "检查 ~/.docker/config.json 中是否有不认识的 registry 地址"
+else pass "未发现 Docker Registry token"; fi
+
+# ============================================================
+# 7. 浏览器钱包扩展检查
+#    OKX / 币安 / Rabby / MetaMask / Phantom / TronLink
+# ============================================================
+section "7/9  浏览器钱包扩展检查"
+
+echo -e "  ${DIM}── EVM 链钱包 ──────────────────────────────${RESET}"
+# MetaMask  (EVM)
+check_browser_wallet "MetaMask" "nkbihfbeogaeaoehlefnkodbefgpgknn"
+# Rabby     (EVM 多链)
+check_browser_wallet "Rabby" "acmacodkjbdgmoleebolmdjonilkdbch"
+# OKX Wallet (EVM + Solana + TRON 多链)
+check_browser_wallet "OKX Wallet" "mcohilncbfahbmgdjkbpemcciiolgcge"
+# Binance Web3 Wallet
+check_browser_wallet "Binance Web3 Wallet" "fhbohimaelbohpjbbldcngcnapndodjp"
+
+echo ""
+echo -e "  ${DIM}── Solana 链钱包 ────────────────────────────${RESET}"
+# Phantom   (Solana + EVM)
+check_browser_wallet "Phantom" "bfnaelmomeimhlpmgjnjophhpkkoljpa"
+
+echo ""
+echo -e "  ${DIM}── TRON 链钱包 ──────────────────────────────${RESET}"
+# TronLink  (TRON)
+check_browser_wallet "TronLink" "ibnejdfjmmkpcnlpebklmnkoeoihofec"
+
+# ============================================================
+# 8. CLI / 开发者链上钱包检查
+# ============================================================
+section "8/9  CLI 开发者钱包检查"
+
+echo -e "  ${DIM}── Solana ──────────────────────────────────${RESET}"
+# Solana CLI 默认密钥对
+check_cli_wallet \
+    "Solana CLI" \
+    "~/.config/solana" \
+    "Solana 私钥文件（id.json）权限应为 600，主网密钥建议迁移至硬件钱包"
+
+echo ""
+echo -e "  ${DIM}── EVM 链（Ethereum / BSC / Polygon / ...）──${RESET}"
+# Geth keystore
+check_cli_wallet \
+    "Geth/EVM keystore" \
+    "~/.ethereum/keystore" \
+    "Geth keystore 是 TrapDoor XOR 加密窃取的目标，确保文件权限为 600"
+# Foundry keystores
+check_cli_wallet \
+    "Foundry" \
+    "~/.foundry/keystores" \
+    "Foundry keystore 含部署私钥，建议使用 cast wallet 加密并设置强密码"
+# Hardhat 项目级助记词
+HARDHAT_CONFIGS=$(find ~ -maxdepth 6 -name "hardhat.config.*" -not -path "*/node_modules/*" 2>/dev/null)
+if [ -n "$HARDHAT_CONFIGS" ]; then
+    MNEMONIC_FOUND=0
+    echo "$HARDHAT_CONFIGS" | while read -r f; do
+        if grep -qiE "(mnemonic|privateKey|private_key)" "$f" 2>/dev/null; then
+            fail "Hardhat 配置文件中发现明文私钥或助记词！"
+            info "文件：$f"
+            recommend "将私钥从 hardhat.config 中移除，改用 dotenv 读取 .env（并加入 .gitignore）"
+            MNEMONIC_FOUND=1
+        fi
+    done
+    [ "$MNEMONIC_FOUND" -eq 0 ] && pass "Hardhat 配置文件中未发现明文私钥"
+else
+    pass "未发现 Hardhat 配置文件"
+fi
+# Frame wallet
+check_cli_wallet \
+    "Frame 桌面钱包" \
+    "~/.config/frame" \
+    "Frame 钱包配置含账户信息，确保 ~/.config/frame 目录权限为 700"
+
+echo ""
+echo -e "  ${DIM}── TRON 链 ──────────────────────────────────${RESET}"
+# TronWeb / TronCLI keystore
+TRON_PATHS=(
+    "$HOME/.tronweb"
+    "$HOME/.tron"
+)
+TRON_FOUND=0
+for tp in "${TRON_PATHS[@]}"; do
+    if [ -d "$tp" ]; then
+        warn "TRON 钱包目录已发现：$tp"
+        recommend "TRON 私钥文件权限应为 600，TronLink 助记词请勿存放在本地明文文件中"
+        TRON_FOUND=1
+    fi
+done
+# 查找 TRON keystore json（project 级别）
+TRON_KEYSTORES=$(find ~ -maxdepth 6 -name "*.json" -not -path "*/node_modules/*" -not -path "*/.cache/*" 2>/dev/null | xargs grep -lE '"privateKey"|"tronAddress"' 2>/dev/null | head -5)
+if [ -n "$TRON_KEYSTORES" ]; then
+    fail "发现疑似含 TRON 私钥的 JSON 文件！"
+    echo "$TRON_KEYSTORES" | while read -r f; do info "$f"; done
+    recommend "确认这些文件是否为测试用密钥，主网私钥严禁明文存储在磁盘"
+    TRON_FOUND=1
+fi
+[ "$TRON_FOUND" -eq 0 ] && pass "TRON：未发现本地钱包文件"
+
+echo ""
+echo -e "  ${DIM}── Aptos / Sui（TrapDoor 重点目标）──────────${RESET}"
+check_cli_wallet \
+    "Sui CLI" \
+    "~/.sui/sui_config" \
+    "Sui keystore 是 TrapDoor build.rs 脚本的直接窃取目标，强烈建议迁移至硬件钱包"
+check_cli_wallet \
+    "Aptos CLI" \
+    "~/.aptos" \
+    "检查 ~/.aptos/config.yaml 中的私钥字段是否被篡改"
+
+# 通用 keystore 扫描（排除系统文件）
+echo ""
+echo -e "  ${DIM}── 通用 keystore 扫描 ──────────────────────${RESET}"
+GENERIC=$(find ~ -maxdepth 5 \
+    \( -name "*.keystore" -o -name "wallet.json" -o -name "UTC--*" \) \
+    -not -path "*/node_modules/*" \
+    -not -path "*/.cache/*" \
+    -not -path "*keyrings/user.keystore*" \
+    2>/dev/null)
+if [ -n "$GENERIC" ]; then
+    warn "发现通用 keystore / 钱包文件"
+    echo "$GENERIC" | while read -r w; do info "$w"; done
+    recommend "确认这些文件的访问权限为 600，并确认非测试用密钥勿存放在本地"
+else
+    pass "未发现通用 keystore 文件（GNOME 系统文件已排除）"
+fi
+
+# ============================================================
+# 9. 环境变量与敏感配置检查
+# ============================================================
+section "9/9  环境变量与敏感配置检查"
+
+SENSITIVE_ENV=$(env | grep -iE "(api_key|secret_key|access_token|private_key|gh_token|github_token|npm_token|mnemonic|wallet_key)" 2>/dev/null)
+if [ -z "$SENSITIVE_ENV" ]; then pass "当前环境变量中无明文敏感凭证"
+else
+    fail "环境变量中发现敏感凭证！"
+    echo "$SENSITIVE_ENV" | sed 's/=.*/=***已隐藏***/' | while read -r line; do info "$line"; done
+    recommend "不要将凭证写入 .bashrc/.zshrc，改用密码管理器或系统密钥环"
+fi
+
+ENV_FILES=$(find ~ -name ".env" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null)
+if [ -z "$ENV_FILES" ]; then pass "未发现散落的 .env 文件"
+else
+    warn "发现 .env 文件"
+    echo "$ENV_FILES" | while read -r f; do
+        KEY_COUNT=$(grep -ciE "(api_key|secret|token|password|private|mnemonic)" "$f" 2>/dev/null || echo 0)
+        info "$f  （含 $KEY_COUNT 处疑似敏感字段）"
+    done
+    recommend "确认这些 .env 文件已加入 .gitignore，永远不要提交到 git 仓库"
+fi
+
+SHELL_KEYS=$(grep -hE "export.*(key|token|secret|password|api|mnemonic)[[:space:]]*=" ~/.bashrc ~/.zshrc ~/.profile 2>/dev/null | grep -v "^#")
+if [ -n "$SHELL_KEYS" ]; then
+    fail "shell 配置文件中发现明文凭证！"
+    echo "$SHELL_KEYS" | sed 's/=.*/=***已隐藏***/' | while read -r line; do info "$line"; done
+    recommend "将这些凭证从 shell 配置中删除，改用 direnv 或系统密钥环管理"
+else
+    pass "shell 配置文件中无明文凭证"
+fi
+
+if [ -f ~/.npmrc ]; then
+    NPM_TOKEN=$(grep -i "authToken\|_auth\|password" ~/.npmrc 2>/dev/null)
+    if [ -n "$NPM_TOKEN" ]; then
+        warn "~/.npmrc 中发现 npm 认证 token"
+        recommend "定期轮换 npm token：npm token revoke <token>"
+    else
+        pass "~/.npmrc 存在但无认证 token"
+    fi
+else
+    pass "未发现 ~/.npmrc 凭证"
+fi
+
+SUSPICIOUS_SERVICES=$(systemctl list-units --type=service --state=running 2>/dev/null \
+    | grep -vE "accounts|avahi|bluetooth|colord|containerd|cron|cups|dbus|docker|fwupd|gdm|gnome|kernel|Modem|Network|nvidia|polkit|power|rsyslog|rtkit|switcheroo|thermal|udisks|unattended|upower|wpa|snapd|systemd|user|getty|multipathd|qemu|serial|ssh|warp|x-ui|ModemManager" \
+    | grep "\.service" | awk '{print $1}')
+if [ -z "$SUSPICIOUS_SERVICES" ]; then pass "未发现可疑 systemd 服务"
+else
+    warn "发现非标准 systemd 服务，请人工确认"
+    echo "$SUSPICIOUS_SERVICES" | while read -r s; do info "$s"; done
+    recommend "对不认识的服务执行：systemctl status <服务名> 查看详情"
+fi
+
+GIT_HOOKS=$(find ~ -maxdepth 6 -path "*/.git/hooks/*" \( -name "post-commit" -o -name "pre-push" -o -name "post-merge" \) -type f 2>/dev/null)
+if [ -z "$GIT_HOOKS" ]; then pass "未发现可疑 git hooks"
+else
+    warn "发现 git hooks 文件"
+    echo "$GIT_HOOKS" | while read -r h; do info "$h"; done
+    recommend "检查这些 hook 文件内容，确认是否由你本人添加"
+fi
+
+# ============================================================
+# 汇总
+# ============================================================
+TOTAL=$((PASS + WARN + FAIL))
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
+echo -e "${BOLD}║                  检查结果汇总                    ║${RESET}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${RESET}"
+echo ""
+echo -e "  ${GREEN}✅ 通过  ${RESET}${BOLD}$PASS${RESET} 项"
+echo -e "  ${YELLOW}⚠️  警告  ${RESET}${BOLD}$WARN${RESET} 项  （需人工确认，不一定是威胁）"
+echo -e "  ${RED}❌ 危险  ${RESET}${BOLD}$FAIL${RESET} 项  （需立即处理）"
+echo ""
+if [ "$FAIL" -gt 0 ]; then
+    echo -e "  ${RED}${BOLD}🚨 发现危险项！请立即按上方建议处理，并考虑轮换所有凭证。${RESET}"
+elif [ "$WARN" -gt 0 ]; then
+    echo -e "  ${YELLOW}${BOLD}检查完成，存在需要关注的项目，请逐一确认。${RESET}"
+else
+    echo -e "  ${GREEN}${BOLD}🎉 全部通过！未发现 TrapDoor 感染迹象，环境安全。${RESET}"
+fi
+echo ""
+echo -e "  ${DIM}共执行 $TOTAL 项检查 | TrapDoor 参考：Socket Security 2026.05.25${RESET}"
+echo ""
